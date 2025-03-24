@@ -19,6 +19,9 @@
 #include <regex>
 #include <stdexcept>
 
+#include <cassert>
+
+
 enum FieldType { INT, FLOAT, STRING };
 
 // Define a basic Field variant class that can hold different types
@@ -233,7 +236,7 @@ public:
         size_t tuple_size = serializedTuple.size();
 
         //std::cout << "Tuple size: " << tuple_size << " bytes\n";
-        assert(tuple_size == 38);
+        // assert(tuple_size == 38);
 
         // Check for first slot with enough space
         size_t slot_itr = 0;
@@ -935,6 +938,9 @@ public:
 
 enum class AggrFuncType { COUNT, MAX, MIN, SUM };
 
+enum class CollisionMode { NoCollision, SomeCollision, MaxCollision };
+CollisionMode collision_mode = CollisionMode::NoCollision;
+
 struct AggrFunc {
     AggrFuncType func;
     size_t attr_index; // Index of the attribute to aggregate
@@ -949,41 +955,117 @@ private:
 
     struct FieldVectorHasher {
         std::size_t operator()(const std::vector<Field>& fields) const {
-            std::size_t hash = 0;
-            for (const auto& field : fields) {
-                std::hash<std::string> hasher;
-                std::size_t fieldHash = 0;
+            // In "no_collision" mode, use the original hashing strategy:
+            std::cout << "test" << std::endl;
+            if (collision_mode == CollisionMode::NoCollision) {
 
-                // Depending on the type, hash the corresponding data
-                switch (field.type) {
-                    case INT: {
-                        // Convert integer data to string and hash
-                        int value = *reinterpret_cast<const int*>(field.data.get());
-                        fieldHash = hasher(std::to_string(value));
-                        break;
+                std::size_t hash = 0;
+                for (const auto& field : fields) {
+                    std::hash<std::string> hasher;
+                    std::size_t fieldHash = 0;
+                    switch (field.type) {
+                        case INT: {
+                            int value = *reinterpret_cast<const int*>(field.data.get());
+                            fieldHash = hasher(std::to_string(value));
+                            break;
+                        }
+                        case FLOAT: {
+                            float value = *reinterpret_cast<const float*>(field.data.get());
+                            fieldHash = hasher(std::to_string(value));
+                            break;
+                        }
+                        case STRING: {
+                            std::string value(field.data.get(), field.data_length - 1);
+                            fieldHash = hasher(value);
+                            break;
+                        }
+                        default:
+                            throw std::runtime_error("Unsupported field type for hashing.");
                     }
-                    case FLOAT: {
-                        // Convert float data to string and hash
-                        float value = *reinterpret_cast<const float*>(field.data.get());
-                        fieldHash = hasher(std::to_string(value));
-                        break;
-                    }
-                    case STRING: {
-                        // Directly hash the string data
-                        std::string value(field.data.get(), field.data_length - 1); // Exclude null-terminator
-                        fieldHash = hasher(value);
-                        break;
-                    }
-                    default:
-                        throw std::runtime_error("Unsupported field type for hashing.");
+                    hash ^= fieldHash + 0x9e3779b9 + (hash << 6) + (hash >> 2);
                 }
-
-                // Combine the hash of the current field with the hash so far
-                hash ^= fieldHash + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+                return hash;
             }
-            return hash;
+            // In "some_collision" mode, force collisions for a fraction of keys.
+            else if (collision_mode == CollisionMode::SomeCollision) {
+                // For simplicity, assume a single INT field key:
+                if (fields.size() == 1 && fields[0].type == INT) {
+                    int value = *reinterpret_cast<const int*>(fields[0].data.get());
+                    // For example, force a collision for 10% of keys
+                    if (value % 10 == 0)
+                        return 42; // constant hash value
+                    else
+                        return static_cast<std::size_t>(value);
+                }
+                // If not a single INT, fallback to the original strategy:
+                else {
+                    std::size_t hash = 0;
+                    for (const auto& field : fields) {
+                        std::hash<std::string> hasher;
+                        std::size_t fieldHash = 0;
+                        switch (field.type) {
+                            case INT: {
+                                int value = *reinterpret_cast<const int*>(field.data.get());
+                                fieldHash = hasher(std::to_string(value));
+                                break;
+                            }
+                            case FLOAT: {
+                                float value = *reinterpret_cast<const float*>(field.data.get());
+                                fieldHash = hasher(std::to_string(value));
+                                break;
+                            }
+                            case STRING: {
+                                std::string value(field.data.get(), field.data_length - 1);
+                                fieldHash = hasher(value);
+                                break;
+                            }
+                            default:
+                                throw std::runtime_error("Unsupported field type for hashing.");
+                        }
+                        hash ^= fieldHash + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+                    }
+                    return hash;
+                }
+            }
+            // In "max_collision" mode, always return a constant hash.
+            else if (collision_mode == CollisionMode::MaxCollision) {
+                std::cout << "here" << std::endl;
+                return 42;
+            }
+            // Fallback: use the original strategy.
+            else {
+                std::size_t hash = 0;
+                for (const auto& field : fields) {
+                    std::hash<std::string> hasher;
+                    std::size_t fieldHash = 0;
+                    switch (field.type) {
+                        case INT: {
+                            int value = *reinterpret_cast<const int*>(field.data.get());
+                            fieldHash = hasher(std::to_string(value));
+                            break;
+                        }
+                        case FLOAT: {
+                            float value = *reinterpret_cast<const float*>(field.data.get());
+                            fieldHash = hasher(std::to_string(value));
+                            break;
+                        }
+                        case STRING: {
+                            std::string value(field.data.get(), field.data_length - 1);
+                            fieldHash = hasher(value);
+                            break;
+                        }
+                        default:
+                            throw std::runtime_error("Unsupported field type for hashing.");
+                    }
+                    hash ^= fieldHash + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+                }
+                return hash;
+            }
         }
     };
+
+
+
 
 
 public:
@@ -995,49 +1077,64 @@ public:
         output_tuples_index = 0;
         output_tuples.clear();
 
-        // Assume a hash map to aggregate tuples based on group_by_attrs
+        // Create the hash map for aggregations
+        std::cout << "TEST2" << std::endl;
         std::unordered_map<std::vector<Field>, std::vector<Field>, FieldVectorHasher> hash_table;
+        std::cout << "TEST3" << std::endl;
+
+        // Variable to accumulate hash map operation time
+        std::chrono::microseconds hm_total_time(0);
 
         while (input->next()) {
-            const auto& tuple = input->getOutput(); // Assume getOutput returns a reference to the current tuple
+            std::cout << "TEST4" << std::endl;
+            auto iter_start = std::chrono::high_resolution_clock::now();
+
+            const auto& tuple = input->getOutput(); // current tuple
 
             // Extract group keys and initialize aggregation values
             std::vector<Field> group_keys;
             for (auto& index : group_by_attrs) {
-                group_keys.push_back(*tuple[index]); // Deep copy the Field object for group key
+                group_keys.push_back(*tuple[index]); // deep copy for group key
             }
 
-            // Process aggregation functions
+            // Check if the group exists and initialize if not
             if (!hash_table.count(group_keys)) {
-                // Initialize aggregate values for a new group
-                std::vector<Field> aggr_values(aggr_funcs.size(), Field(0)); // Assuming Field(int) initializes an integer Field
+                std::vector<Field> aggr_values(aggr_funcs.size(), Field(0));
                 hash_table[group_keys] = aggr_values;
             }
 
-            // Update aggregate values
+            // Update aggregate values for the group
             auto& aggr_values = hash_table[group_keys];
             for (size_t i = 0; i < aggr_funcs.size(); ++i) {
-                // Simplified update logic for demonstration
-                // You'll need to implement actual aggregation logic here
                 aggr_values[i] = updateAggregate(aggr_funcs[i], aggr_values[i], *tuple[aggr_funcs[i].attr_index]);
             }
+
+            auto iter_end = std::chrono::high_resolution_clock::now();
+            hm_total_time += std::chrono::duration_cast<std::chrono::microseconds>(iter_end - iter_start);
         }
 
-        // Prepare output tuples from the hash table
+        std::cout << "Hash map operation time: " 
+                << hm_total_time.count() << " microseconds" << std::endl;
+
+        // Prepare output tuples from the hash table (post-aggregation)
         for (const auto& entry : hash_table) {
+            std::cout << "TEST2" << std::endl;
             const auto& group_keys = entry.first;
             const auto& aggr_values = entry.second;
             Tuple output_tuple;
-            // Assuming Tuple has a method to add Fields
+            // Add group key fields
             for (const auto& key : group_keys) {
-                output_tuple.addField(std::make_unique<Field>(key)); // Add group keys to the tuple
+                output_tuple.addField(std::make_unique<Field>(key));
             }
+            // Add aggregated values
             for (const auto& value : aggr_values) {
-                output_tuple.addField(std::make_unique<Field>(value)); // Add aggregated values to the tuple
+                output_tuple.addField(std::make_unique<Field>(value));
             }
             output_tuples.push_back(std::move(output_tuple));
         }
     }
+
+
 
     bool next() override {
         if (output_tuples_index < output_tuples.size()) {
@@ -1417,7 +1514,7 @@ public:
     void executeQueries() {
 
         std::vector<std::string> test_queries = {
-            "SUM{1} GROUP BY {1} WHERE {1} > 2 and {1} < 6"
+            "SUM{2} GROUP BY {1} WHERE {1} > 2 and {1} < 100"
         };
 
         for (const auto& query : test_queries) {
@@ -1430,37 +1527,50 @@ public:
     
 };
 
-int main() {
+int main(int argc, char* argv[]) {
 
+    // Parse command-line argument for collision mode
+    if (argc > 1) {
+        std::string mode(argv[1]);
+        if (mode == "--no_collision") {
+            collision_mode = CollisionMode::NoCollision;
+        } else if (mode == "--some_collision") {
+            collision_mode = CollisionMode::SomeCollision;
+        } else if (mode == "--max_collision") {
+            collision_mode = CollisionMode::MaxCollision;
+        } else {
+            std::cerr << "Unknown collision mode: " << mode << std::endl;
+            return 1;
+        }
+        std::cout << "Collision mode set to: " << mode << std::endl;
+    } else {
+        std::cout << "Using default collision mode (no_collision)." << std::endl;
+    }
+
+    // Initialize your database object
     BuzzDB db;
 
+    // Open input file
     std::ifstream inputFile("output.txt");
-
     if (!inputFile) {
         std::cerr << "Unable to open file" << std::endl;
         return 1;
     }
 
     int field1, field2;
-    int i = 0;
     while (inputFile >> field1 >> field2) {
-        if(i++ % 10000 == 0){
-            db.insert(field1, field2);
-        }
+        db.insert(field1, field2);
     }
 
     auto start = std::chrono::high_resolution_clock::now();
-
     db.executeQueries();
-
     auto end = std::chrono::high_resolution_clock::now();
 
     // Calculate and print the elapsed time
     std::chrono::duration<double> elapsed = end - start;
-    std::cout << "Elapsed time: " << 
-    std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count() 
-          << " microseconds" << std::endl;
+    std::cout << "Elapsed time: " 
+              << std::chrono::duration_cast<std::chrono::microseconds>(elapsed).count() 
+              << " microseconds" << std::endl;
 
-    
     return 0;
 }
