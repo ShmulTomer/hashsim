@@ -4,7 +4,10 @@ import glob
 
 # List of C++ files to compile
 # Use glob to get all .cpp files
-cpp_files = glob.glob('45-buzzdb.cpp')
+cpp_files = ['45-buzzdb.cpp', '46-buzzdb.cpp']
+cpp_file_paths = []
+for file in cpp_files: 
+    cpp_file_paths.append(glob.glob(file))
 
 def compile_cpp(file):
     # Define the command to compile the C++ file
@@ -28,4 +31,5 @@ if __name__ ==  '__main__':
     # Create a ProcessPoolExecutor
     with concurrent.futures.ProcessPoolExecutor() as executor:
         # Use the executor to compile all C++ files in parallel
-        executor.map(compile_cpp, cpp_files)
+        for path in cpp_file_paths:
+            executor.map(compile_cpp, path)

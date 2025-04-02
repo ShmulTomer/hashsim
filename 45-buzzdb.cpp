@@ -21,6 +21,8 @@
 
 #include <cassert>
 
+#include "ElasticHashMap.hpp"
+
 
 enum FieldType { INT, FLOAT, STRING };
 
@@ -940,6 +942,8 @@ enum class AggrFuncType { COUNT, MAX, MIN, SUM };
 
 enum class CollisionMode { NoCollision, SomeCollision, MaxCollision };
 CollisionMode collision_mode = CollisionMode::NoCollision;
+enum class MapType {STD, EH};
+MapType map_type = MapType::STD;
 
 struct AggrFunc {
     AggrFuncType func;
@@ -1073,66 +1077,87 @@ public:
         : UnaryOperator(input), group_by_attrs(group_by_attrs), aggr_funcs(aggr_funcs) {}
 
     void open() override {
-        input->open(); // Ensure the input operator is opened
-        output_tuples_index = 0;
-        output_tuples.clear();
+    input->open(); // Ensure the input operator is opened
+    output_tuples_index = 0;
+    output_tuples.clear();
 
-        // Create the hash map for aggregations
-        std::cout << "TEST2" << std::endl;
-        std::unordered_map<std::vector<Field>, std::vector<Field>, FieldVectorHasher> hash_table;
-        std::cout << "TEST3" << std::endl;
+    // Create the elastic hash map for aggregations
+    std::cout << "TEST2" << std::endl;
 
-        // Variable to accumulate hash map operation time
-        std::chrono::microseconds hm_total_time(0);
+    // -------------------------
+    // CHANGED HERE: Instead of std::unordered_map, define an ElasticHashMap
+    // with some capacity. e.g., 10,000 or 50,000 etc.
+    // FieldVectorHasher is your collision logic
+    // -------------------------
+    ElasticHashMap<std::vector<Field>, std::vector<Field>, FieldVectorHasher>hash_table(50000, FieldVectorHasher{});
+    std::cout << "TEST3" << std::endl;
 
-        while (input->next()) {
-            std::cout << "TEST4" << std::endl;
-            auto iter_start = std::chrono::high_resolution_clock::now();
+    // Variable to accumulate hash map operation time
+    std::chrono::microseconds hm_total_time(0);
 
-            const auto& tuple = input->getOutput(); // current tuple
+    while (input->next()) {
+        std::cout << "TEST4" << std::endl;
+        auto iter_start = std::chrono::high_resolution_clock::now();
 
-            // Extract group keys and initialize aggregation values
-            std::vector<Field> group_keys;
-            for (auto& index : group_by_attrs) {
-                group_keys.push_back(*tuple[index]); // deep copy for group key
-            }
+        const auto& tuple = input->getOutput(); // current tuple
 
-            // Check if the group exists and initialize if not
-            if (!hash_table.count(group_keys)) {
-                std::vector<Field> aggr_values(aggr_funcs.size(), Field(0));
-                hash_table[group_keys] = aggr_values;
-            }
-
-            // Update aggregate values for the group
-            auto& aggr_values = hash_table[group_keys];
-            for (size_t i = 0; i < aggr_funcs.size(); ++i) {
-                aggr_values[i] = updateAggregate(aggr_funcs[i], aggr_values[i], *tuple[aggr_funcs[i].attr_index]);
-            }
-
-            auto iter_end = std::chrono::high_resolution_clock::now();
-            hm_total_time += std::chrono::duration_cast<std::chrono::microseconds>(iter_end - iter_start);
+        // Extract group keys
+        std::vector<Field> group_keys;
+        for (auto& index : group_by_attrs) {
+            group_keys.push_back(*tuple[index]); // deep copy for group key
         }
 
-        std::cout << "Hash map operation time: " 
-                << hm_total_time.count() << " microseconds" << std::endl;
+        // Check if the group exists; if not, create default
+        if (!hash_table.count(group_keys)) {
+            std::vector<Field> aggr_values(aggr_funcs.size(), Field(0));
+            hash_table.insertOrUpdate(group_keys, aggr_values);
+        }
 
-        // Prepare output tuples from the hash table (post-aggregation)
-        for (const auto& entry : hash_table) {
-            std::cout << "TEST2" << std::endl;
-            const auto& group_keys = entry.first;
-            const auto& aggr_values = entry.second;
-            Tuple output_tuple;
-            // Add group key fields
-            for (const auto& key : group_keys) {
-                output_tuple.addField(std::make_unique<Field>(key));
+        // Update aggregate values for that group
+        auto& aggr_values = hash_table[group_keys]; 
+        // Now we have a reference to the stored vector<Field> in the table
+
+        for (size_t i = 0; i < aggr_funcs.size(); ++i) {
+            aggr_values[i] = updateAggregate(
+                aggr_funcs[i],
+                aggr_values[i],
+                *tuple[aggr_funcs[i].attr_index]
+            );
+        }
+
+        auto iter_end = std::chrono::high_resolution_clock::now();
+        hm_total_time += std::chrono::duration_cast<std::chrono::microseconds>(iter_end - iter_start);
+    }
+
+    std::cout << "Hash map operation time: " 
+              << hm_total_time.count() << " microseconds" << std::endl;
+
+    // Prepare output tuples from the hash table (post-aggregation)
+    // CHANGED: we must iterate over the entire hash_table contents. 
+    // We'll add a small method in ElasticHashMap to help with iteration:
+    // (Alternatively, store them during insertion or do a separate approach.)
+
+    // We'll do a naive approach: each subarray, each slot
+    for (auto& sub : hash_table.subarrays) {
+        for (auto& slot : sub.slots) {
+            if (slot.occupied) {
+                const auto& group_keys = slot.key;
+                const auto& aggr_values = slot.value;
+                Tuple output_tuple;
+                // Add group key fields
+                for (const auto& key : group_keys) {
+                    output_tuple.addField(std::make_unique<Field>(key));
+                }
+                // Add aggregated values
+                for (const auto& value : aggr_values) {
+                    output_tuple.addField(std::make_unique<Field>(value));
+                }
+                output_tuples.push_back(std::move(output_tuple));
             }
-            // Add aggregated values
-            for (const auto& value : aggr_values) {
-                output_tuple.addField(std::make_unique<Field>(value));
-            }
-            output_tuples.push_back(std::move(output_tuple));
         }
     }
+}
+
 
 
 
@@ -1542,7 +1567,22 @@ int main(int argc, char* argv[]) {
             std::cerr << "Unknown collision mode: " << mode << std::endl;
             return 1;
         }
+        if (argc > 2) {
+            std::string map_arg(argv[2]); 
+            if (map_arg == "--elastic_hashing") { 
+                map_type = MapType::EH;
+            }
+            else {
+                std::cerr << "Unknown Map Type" << map_arg <<std::endl;
+                return 1;
+            }
+        std::cout << "Map type set to: " << map_arg << std::endl;
+        }
+        else {
+            std::cout << "Map type set to: standard" <<std::endl;
+        }
         std::cout << "Collision mode set to: " << mode << std::endl;
+        
     } else {
         std::cout << "Using default collision mode (no_collision)." << std::endl;
     }
